@@ -104,7 +104,7 @@ function mergeDocUpdates(node: Node, upd: Update): Version {
       node.docs.set(id, {
         value: du.value,
         type: du.type,
-        version: du.version,
+        version: structuredClone(du.version),
       })
 
       // We're missing the whole thing.
@@ -463,4 +463,4 @@ function fuzzer(seed: string) {
 }
 
 
-fuzzer("2221")
+fuzzer("1234512")

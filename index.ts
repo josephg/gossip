@@ -4,8 +4,8 @@ import { pushSingle, versionContainsVersion, versionsDistinct, versionSubtract, 
 
 type Id = number
 
-const idGen = (() => {
-  let next = 0
+const idGen = ((start = 0) => {
+  let next = start
 
   return () => (next++)
 })
@@ -19,9 +19,12 @@ type Message = {
 } | {
   type: 'update',
   update: Update,
+
+  // For debugging.
+  expectPreVersion: Version,
 }
 
-const VERBOSE = true
+let VERBOSE = false
 
 interface Node {
   // Globally unique peer ID.
@@ -30,6 +33,8 @@ interface Node {
 
   // Versions known to this peer.
   knownVersions: Version,
+
+  dbgEvents: (Message | any)[],
 
   docs: Map<Id, {
     type: DocType,
@@ -41,11 +46,14 @@ interface Node {
   connections: Map<Node, {
     // Probabably split this into the versions we do & don't locally know.
     // remoteVersion: Version | null, // Null if we don't have a hello message yet.
+    state: 'init' | 'connected',
     messages: Message[],
+
+    dbgEvents: [string, Message][],
   }>,
 }
 
-const nextDocId = idGen()
+const nextDocId = idGen(1000)
 const nextNodeId = idGen()
 
 function createNode(id: number): Node {
@@ -55,16 +63,20 @@ function createNode(id: number): Node {
     knownVersions: new Map(),
     docs: new Map(),
     connections: new Map(),
+
+    dbgEvents: [],
   }
 }
 
 function sendMessage(sender: Node, receiver: Node, msg: Message) {
   assert(sender.connections.has(receiver))
 
-  console.log('SEND', sender.id, '->', receiver.id, msg)
+  // console.log('SEND', sender.id, '->', receiver.id, msg)
 
-  let mbox = receiver.connections.get(sender)!.messages
-  mbox.push(msg)
+  let conn = receiver.connections.get(sender)!
+  conn.messages.push(msg)
+
+  sender.connections.get(receiver)!.dbgEvents.push(['send', msg])
 }
 
 type DocUpdate = {
@@ -120,8 +132,8 @@ function mergeDocUpdates(node: Node, upd: Update): Version {
 
         // They'll be the same if the versions are the same, but we might have new versions locally
         // that aren't in the update message.
-        console.log('duv', du.version, 'docv', doc.version)
-        console.log('upd v', du.value, 'doc val', doc.value)
+        // console.log('duv', du.version, 'docv', doc.version)
+        // console.log('upd v', du.value, 'doc val', doc.value)
         assert(doc.value >= du.value)
       } else {
         doc.value = max(du.value, doc.value)
@@ -144,10 +156,11 @@ function assertUnreachable(x: never): never {
 function recvMessage(receiver: Node, sender: Node, msg: Message) {
   let conn = receiver.connections.get(sender)
   assert(conn != null)
+  conn.dbgEvents.push(['recv', msg])
 
   assert(receiver != sender)
 
-  console.log('node', receiver.id, 'RECV from', sender.id, msg.type)
+  // console.log('node', receiver.id, 'RECV from', sender.id, msg.type)
   switch (msg.type) {
     case 'connected': {
       // assert(conn.remoteVersion == null)
@@ -161,30 +174,43 @@ function recvMessage(receiver: Node, sender: Node, msg: Message) {
       sendMessage(receiver, sender, {
         type: 'update',
         update,
+
+        // TODO.
+        expectPreVersion: new Map(),
       })
 
       // We can union these versions now because we'll assume our message is received.
       // conn.remoteVersion = versionUnion(remoteVersion, receiver.knownVersions)
+
+      assert.equal(conn.state, 'init')
+      conn.state = 'connected'
       break
     }
 
     case 'update': {
+      assert.equal(conn.state, 'connected')
+
+      // if (conn.state === 'init') conn.state = 'connected'
+
+      assert(versionContainsVersion(receiver.knownVersions, msg.expectPreVersion))
+
+
       let addedVersions = mergeDocUpdates(receiver, msg.update)
 
-      console.log('kv', receiver.knownVersions, 'msg', msg, 'adv', addedVersions)
+      // console.log('kv', receiver.knownVersions, 'msg', msg, 'adv', addedVersions)
       assert(versionsDistinct(receiver.knownVersions, addedVersions))
       // This is a bit lazy.
       let update = getOpsSince(receiver, receiver.knownVersions)
-      receiver.knownVersions = versionUnion(receiver.knownVersions, addedVersions)
-      console.log('node', receiver.id, 'KV ->', receiver.knownVersions)
 
       if (update.size > 0) {
         for (const [node, c] of receiver.connections) {
-          if (node == sender) continue // Don't send back to sender.
+          if (node == sender || c.state === 'init') continue // Don't send back to sender.
 
           sendMessage(receiver, node, {
             type: 'update',
             update,
+
+            expectPreVersion: structuredClone(receiver.knownVersions),
           })
 
           // The peer now has all our versions.
@@ -192,12 +218,17 @@ function recvMessage(receiver: Node, sender: Node, msg: Message) {
         }
       }
 
+      receiver.knownVersions = versionUnion(receiver.knownVersions, addedVersions)
+      // console.log('node', receiver.id, 'KV ->', receiver.knownVersions)
+
       break
     }
 
     default:
       assertUnreachable(msg)
   }
+
+  receiver.dbgEvents.push(msg)
 }
 
 function changeValue(node: Node, docId: Id, value: number) {
@@ -207,15 +238,17 @@ function changeValue(node: Node, docId: Id, value: number) {
 
   // Assign a new version.
   let seq = node.nextSeq()
-  console.log('CONSUME', node.id, seq)
+  // console.log('CONSUME', node.id, seq)
 
+  let oldKV = structuredClone(node.knownVersions)
   pushSingle(node.knownVersions, node.id, seq)
   pushSingle(doc.version, node.id, seq)
 
   assert(value >= doc.value)
   doc.value = value
 
-  console.log('node', node.id, 'UPDATED', docId, 'val:', value, 'version', doc.version)
+  // console.log('node', node.id, 'UPDATED', docId, 'val:', value, 'version', doc.version)
+  node.dbgEvents.push({type: 'changeval', docId, value, id: node.id, seq})
 
   // We'll broadcast the update to our peers. This is ok because the other peers should be
   // at the parent version already.
@@ -228,10 +261,13 @@ function changeValue(node: Node, docId: Id, value: number) {
 
   // console.log('update', update)
 
-  for (const otherNode of node.connections.keys()) {
-    sendMessage(node, otherNode, {
-      type: 'update', update
-    })
+  for (const [otherNode, c] of node.connections) {
+    if (c.state === 'connected') {
+      sendMessage(node, otherNode, {
+        type: 'update', update,
+        expectPreVersion: oldKV
+      })
+    }
   }
 }
 
@@ -240,14 +276,17 @@ function insertDoc(node: Node, docId: Id, type: DocType, value: number) {
 
   // Assign a new version.
   let seq = node.nextSeq()
-  console.log('CONSUME', node.id, seq)
+  // console.log('CONSUME', node.id, seq)
 
   let version: Version = new Map()
   pushSingle(version, node.id, seq)
 
   node.docs.set(docId, { type, value, version })
 
-  console.log('node', node.id, 'CREATED', docId, 'type', type, 'val:', value)
+  // console.log('node', node.id, 'CREATED', docId, 'type', type, 'val:', value)
+  node.dbgEvents.push({type: 'ins doc', docId, value, id: node.id, seq})
+
+  let oldKV = structuredClone(node.knownVersions)
 
   pushSingle(node.knownVersions, node.id, seq)
 
@@ -255,17 +294,26 @@ function insertDoc(node: Node, docId: Id, type: DocType, value: number) {
   const update: Update = new Map()
   update.set(docId, { type, value, version: structuredClone(version), })
 
-  for (const otherNode of node.connections.keys()) {
-    sendMessage(node, otherNode, {
-      type: 'update', update
-    })
+  for (const [otherNode, c] of node.connections) {
+    if (c.state === 'connected') {
+      sendMessage(node, otherNode, {
+        type: 'update', update,
+        expectPreVersion: oldKV
+      })
+    } else {
+      // console.warn('SKIPPING TELLING', otherNode.id)
+      c.dbgEvents.push(['SKIP', {
+        type: 'update', update,
+        expectPreVersion: oldKV
+      }])
+    }
   }
 }
 
 function connect(a: Node, b: Node) {
   assert(a != b)
-  a.connections.set(b, { messages: [] })
-  b.connections.set(a, { messages: [] })
+  a.connections.set(b, { state: 'init', messages: [], dbgEvents: [] })
+  b.connections.set(a, { state: 'init', messages: [], dbgEvents: [] })
 
   sendMessage(a, b, {type: 'connected', version: structuredClone(a.knownVersions)})
   sendMessage(b, a, {type: 'connected', version: structuredClone(b.knownVersions)})
@@ -318,13 +366,13 @@ function checkNetwork(net: Network) {
   }
 }
 
-function fuzzer(seed: string) {
+function fuzzer(seed: string | number, verbose: boolean = true) {
   const random = seedRandom(`s ${seed}`)
   // const newId = () => random().toString(36).slice(2)
   const randInt = (n: number) => Math.floor(random() * n)
   const randBool = (weight = 0.5) => random() < weight
 
-  let verbose = true
+  // let verbose = true
 
   const network = {
     nodes: new Map<Id, Node>()
@@ -341,9 +389,9 @@ function fuzzer(seed: string) {
     if (verbose) console.log('\n------------------------------------------------\ni', i)
     // Do some actions from:
 
-    if (i == 63) {
-      debugger;
-    }
+    // if (i == 63) {
+    //   debugger;
+    // }
 
     // Connect (random 2 peers). TODO: Bias this!
     if (randBool(0.1)) {
@@ -416,8 +464,8 @@ function fuzzer(seed: string) {
         changeValue(node, docId, newValue)
         if (verbose) console.log('set node', node.id, 'doc id', docId, 'val', newValue)
 
-        console.log('NODE KV', node.knownVersions)
-        console.log(node.docs.get(docId))
+        // console.log('NODE KV', node.knownVersions)
+        // console.log(node.docs.get(docId))
 
         checkNode(node)
       }
@@ -469,4 +517,11 @@ function fuzzer(seed: string) {
 }
 
 
-fuzzer("1234511231232")
+// fuzzer("123123", VERBOSE)
+
+{
+  for (let j = 0; j < 1000; j++) {
+    if (j % 100 == 0) console.log('j', j)
+    fuzzer(j, false)
+  }
+}

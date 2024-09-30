@@ -116,7 +116,13 @@ function mergeDocUpdates(node: Node, upd: Update): Version {
 
       let addedVersions = versionSubtract(du.version, doc.version)
       if (addedVersions.size == 0) {
-        assert.equal(doc.value, du.value)
+        // assert.equal(doc.value, du.value)
+
+        // They'll be the same if the versions are the same, but we might have new versions locally
+        // that aren't in the update message.
+        console.log('duv', du.version, 'docv', doc.version)
+        console.log('upd v', du.value, 'doc val', doc.value)
+        assert(doc.value >= du.value)
       } else {
         doc.value = max(du.value, doc.value)
         doc.version = versionUnion(du.version, doc.version)
@@ -335,7 +341,7 @@ function fuzzer(seed: string) {
     if (verbose) console.log('\n------------------------------------------------\ni', i)
     // Do some actions from:
 
-    if (i == 19) {
+    if (i == 63) {
       debugger;
     }
 
@@ -463,4 +469,4 @@ function fuzzer(seed: string) {
 }
 
 
-fuzzer("1234512")
+fuzzer("1234511231232")

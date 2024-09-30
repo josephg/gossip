@@ -8,6 +8,7 @@ export type SeqRange = [number, number] // [start, end).
 export type Version = Map<Id, SeqRange[]>
 
 export function pushRLE(ranges: SeqRange[], start: number, end: number) {
+  assert(end > start)
   if (ranges.length > 0) {
     assert(start >= ranges[ranges.length - 1][1])
   }
@@ -139,12 +140,14 @@ export function versionUnion(a: Version, b: Version): Version {
           b_i++
         } else {
           // Intersect. Take the union of both entries.
-          pushRLE(r,
-            ar_start < br_start ? ar_start : br_start,
-            ar_end > br_end ? ar_end : br_end
-          )
+          let start = ar_start < br_start ? ar_start : br_start
+          let end = ar_end > br_end ? ar_end : br_end
+          pushRLE(r, start, end)
           a_i++
           b_i++
+
+          while (a_i < aRanges.length && aRanges[a_i][1] <= end) a_i++
+          while (b_i < bRanges.length && bRanges[b_i][1] <= end) b_i++
         }
       }
 
@@ -162,3 +165,5 @@ export function versionUnion(a: Version, b: Version): Version {
   return result
 }
 
+// debugger
+// versionUnion(new Map([[1, [[0, 5]]]]), new Map([[1, [[0, 2], [4, 5]]]]))
